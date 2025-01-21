@@ -1,9 +1,10 @@
+use crate::shared::req_resp;
 use crate::table::{self, VirtualTable};
 use crate::Message;
 use iced::{widget::{center, container, pane_grid::{self, Axis, Pane}, text, Column}, Alignment::Center, Color, Element, Font, Length::Fill, Task, Theme};
 use iced_aw::{direction::{Horizontal, Vertical}, style::tab_bar::dark, tab_bar::{self, Style}, tabs::tab_bar_position, TabBarPosition, TabLabel, Tabs};
 
-use crate::server_old as server;
+// use crate::server_old as server;
 
 
 pub mod settings;
@@ -116,14 +117,22 @@ impl UI {
                 self.active_tab = tab_id.clone();
                 match tab_id {
                     UITabID::Orders => {
+                        let mut request = req_resp::Request {
+                            kind: req_resp::RequestKind::OffersTables,
+                            payload: None
+                        };
                         return Task::perform(
-                            async move {server::FetchVirtualTablesAndItems::from_db()}, 
+                            async move {request.send_request("".to_string()).await}, 
                             |value| {OrderListMessage::FetchedVirtualTablesAndItems(value).into()}
                         )
                     },
                     UITabID::VirtualTableManager => {
+                        let mut request = req_resp::Request {
+                            kind: req_resp::RequestKind::Tables,
+                            payload: None
+                        };
                         return Task::perform(
-                            async move {server::FetchVirtualTables::from_db()}, 
+                            async move {request.send_request("".to_string()).await}, 
                             |value| {VirtualTableManagerMessage::FetchedVirtualTables(value).into()}
                         )
                     },

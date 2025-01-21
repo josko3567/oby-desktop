@@ -3,9 +3,7 @@ mod ui;
 mod table;
 mod user;
 mod error;
-mod server_old;
-mod server_http;
-mod database_types;
+mod shared;
 
 use std::process::exit;
 
@@ -118,15 +116,23 @@ impl App {
         // Combine subscriptions if there are multiple tabs
         if self.page == Page::UI
         && self.part.ui.active_tab == crate::ui::UITabID::Orders {
-            self.part.ui.orders.subscription()
+            return self.part.ui.orders.subscription()
         } else {
-            iced::Subscription::none()
+            return iced::Subscription::none()
         }
     }
+
+    fn title(&self) -> String {
+        "OBY Desktop".to_string()
+    }
+
+    // fn title()
 
 }
 
 fn main() -> iced::Result {
+
+    env_logger::init();
 
     if cfg!(debug_assertions) {
 
@@ -142,7 +148,7 @@ fn main() -> iced::Result {
             App::new()
         };
 
-        iced::application("OBY Desktop", App::update, App::view)
+        iced::application(App::title, App::update, App::view)
             .theme(App::theme)
             .centered()
             .font(ICON_BYTES)
@@ -151,7 +157,7 @@ fn main() -> iced::Result {
 
     } else {
 
-        iced::application("OBY Desktop", App::update, App::view)
+        iced::application(App::title, App::update, App::view)
             .theme(App::theme)
             .centered()
             .font(ICON_BYTES)

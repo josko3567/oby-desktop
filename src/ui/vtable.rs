@@ -1,10 +1,10 @@
 use clap::builder::Str;
-use iced::{advanced::widget::operation::text_input, border::Radius, widget::{button, center, container, row, scrollable, text, Column}, Border, Length, Task, Theme};
+use iced::{advanced::widget::operation::text_input, border::Radius, widget::{button, center, container, row, scrollable, text, Column, Svg}, Border, Length, Task, Theme};
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+use serde_json::json;
 
-use crate::server_old as server;
 
-use crate::database_types;
-
+use crate::shared::{dbt as dbt, req_resp};
 use super::Tab;
 
 const TITLE: &str = "Virtual Tables"; 
@@ -12,11 +12,13 @@ const ICON:  char = '\u{e9ba}';
 
 #[derive(Debug, Clone)]
 pub enum VirtualTableManagerMessage {
-    FetchedVirtualTables(Result<server::FetchVirtualTables, String>),
-    DeleteVirtualTable(database_types::VirtualTableID),
-    DeleteVirtualTablePost(Result<(), String>),
-    AddVirtualTable(database_types::VirtualTableID),
-    AddVirtualTablePost(Result<(), String>),
+    FetchedVirtualTables(Result<serde_json::Value, String>),
+    GenerateQRCode(dbt::VirtualTableID),
+    CloseQRCode,
+    DeleteVirtualTable(dbt::VirtualTableID),
+    DeleteVirtualTablePost(Result<serde_json::Value, String>),
+    AddVirtualTable(dbt::VirtualTableID),
+    AddVirtualTablePost(Result<serde_json::Value, String>),
     TextInputed(String)
 }
 
@@ -28,15 +30,17 @@ impl Into<crate::Message> for VirtualTableManagerMessage {
 
 
 pub struct VirtualTableManager {
-    pub fetch_vtables: Result<server::FetchVirtualTables, String>,
-    pub table_name: String
+    pub fetch_vtables: Result<Vec<dbt::VirtualTable>, String>,
+    pub qr_code: Option<(dbt::VirtualTableID, iced::widget::qr_code::Data)>,
+    pub table_name_text_input: String
 }
 
 impl Default for VirtualTableManager {
     fn default() -> Self {
         Self { 
             fetch_vtables: Err("Fetching data...".to_string()),
-            table_name: String::new()
+            qr_code: None,
+            table_name_text_input: String::new()
         }
     }
 }
@@ -47,46 +51,101 @@ impl VirtualTableManager {
 
     pub fn update(&mut self, message: VirtualTableManagerMessage) -> Task<crate::Message> {
 
+        const QUERY_ENCODE_SET: &AsciiSet = &CONTROLS
+            .add(b' ')
+            .add(b'"')
+            .add(b'<')
+            .add(b'>')
+            .add(b'#')
+            .add(b'%')
+            .add(b'&')
+            .add(b'/')
+            .add(b'=');
+
         match message {
-            VirtualTableManagerMessage::FetchedVirtualTables(tables) => {
-                self.fetch_vtables = tables
+            VirtualTableManagerMessage::GenerateQRCode(table) => {
+                let IP = req_resp::get_local_ip_address().expect("Not connected to a network dummy!");
+
+                let format = format!(
+                    "http://{}:{}/{}", 
+                    IP, 
+                    req_resp::HTML_PORT, 
+                    utf8_percent_encode(
+                        table.clone().as_str(),
+                        QUERY_ENCODE_SET
+                    )
+                );
+                self.qr_code = Some((table.clone(), iced::widget::qr_code::Data::new(
+                    format.as_bytes()
+                ).expect("QRCodeData")));
+            }
+            VirtualTableManagerMessage::CloseQRCode => {
+                self.qr_code = None;
+            }
+            VirtualTableManagerMessage::FetchedVirtualTables(response) => {
+                if response.is_ok() {
+                    match serde_json::from_value::<req_resp::TablesResponseData>(response.unwrap()) {
+                        Ok(payload) => self.fetch_vtables = Ok(payload.tables),
+                        Err(err) => self.fetch_vtables = Err(err.to_string())
+                    }
+                } else {
+                    self.fetch_vtables = Err(response.unwrap_err().to_string())
+                }
             },
             VirtualTableManagerMessage::DeleteVirtualTable(table) => {
-                let request = server::RequestDeleteVirtualTable {
-                    table_id: table
+                let mut request = req_resp::Request {
+                    kind: req_resp::RequestKind::TablesDelete,
+                    payload: None
                 };
                 return Task::perform(
-                    async move {request.send_request()}, 
-                    |value| {VirtualTableManagerMessage::DeleteVirtualTablePost(value).into()}
+                    async move {request.send_request(table).await}, 
+                    |value| {
+                        VirtualTableManagerMessage::DeleteVirtualTablePost(value).into()}
                 )
             },
             VirtualTableManagerMessage::DeleteVirtualTablePost(result) => {
                 if result.is_ok() {
+                    let mut request = req_resp::Request {
+                        kind: req_resp::RequestKind::Tables,
+                        payload: None
+                    };
                     return Task::perform(
-                        async move {server::FetchVirtualTables::from_db()}, 
+                        async move {request.send_request("".to_string()).await}, 
                         |value| {VirtualTableManagerMessage::FetchedVirtualTables(value).into()}
                     )
                 }
             },
-            VirtualTableManagerMessage::AddVirtualTable(table) => {
-                let request = server::RequestInsertVirtualTable {
-                    table_id: table
+            VirtualTableManagerMessage::AddVirtualTable(name) => {
+                if name.is_empty() {
+                    return Task::none()
+                }
+                let mut request = req_resp::Request {
+                    kind: req_resp::RequestKind::TablesInsert,
+                    payload: Some(serde_json::to_value(req_resp::TablesInsertRequestData {
+                        table: dbt::VirtualTable { name, order_count: 0 }
+                    }).unwrap())
                 };
                 return Task::perform(
-                    async move {request.send_request()}, 
+                    async move {request.send_request("".to_string()).await}, 
                     |value| {VirtualTableManagerMessage::AddVirtualTablePost(value).into()}
                 )
             },
             VirtualTableManagerMessage::AddVirtualTablePost(result) => {
                 if result.is_ok() {
-                    self.table_name = String::new();
+                    self.table_name_text_input = String::new();
+                    let mut request = req_resp::Request {
+                        kind: req_resp::RequestKind::Tables,
+                        payload: None
+                    };
                     return Task::perform(
-                        async move {server::FetchVirtualTables::from_db()}, 
-                        |value| {VirtualTableManagerMessage::FetchedVirtualTables(value).into()}
+                        async move {request.send_request("".to_string()).await}, 
+                        |value| {
+                            VirtualTableManagerMessage::FetchedVirtualTables(value).into()
+                        }
                     )
                 }
             }
-            VirtualTableManagerMessage::TextInputed(text) => {self.table_name = text}
+            VirtualTableManagerMessage::TextInputed(text) => {self.table_name_text_input = text}
         }
         Task::none()
 
@@ -208,21 +267,63 @@ impl Tab for VirtualTableManager {
         
         if self.fetch_vtables.is_err() {
             text!("{}", self.fetch_vtables.clone().expect_err("").to_string()).into()
-        } else {
-
+        } else if self.qr_code.is_some() {
             let mut col: Column<'_, crate::Message> = Column::new().spacing(20).padding(30);
 
-            let vtables = self.fetch_vtables.clone().unwrap().vtables;
+            col = col.push(
+                center(
+                    text!("{}", self.qr_code.as_ref().unwrap().0),
+                )
+                .padding(10)
+                // .style(vtable_container_style)
+                .height(Length::Fixed(50.0))
+                .width(Length::Fill)
+            );
+
+            col = col.push(
+                center(
+                    iced::widget::qr_code(&self.qr_code.as_ref().unwrap().1)
+                )
+                .padding(10)
+                .style(vtable_container_style)
+                .width(Length::Fill)
+                .height(Length::Fill)
+            );
+
+            col = col.push(
+                
+            // center(
+                    button("Close")
+                        .on_press(VirtualTableManagerMessage::CloseQRCode.into())
+                        .style(virtual_table_button_style_add)
+                // )
+                // .padding(10)
+                // .height(Length::Fixed(50.0))
+                // .width(Length::Fixed(100.0))
+            );
+
+            center(col).width(Length::Fill).into()
+
+        } else {
+
+            
+            let mut col: Column<'_, crate::Message> = Column::new().spacing(20).padding(30);
+            
+            let vtables = self.fetch_vtables.clone().unwrap();
             for vtable in vtables.iter() {
+                // let svg_icon = iced::widget::Svg::from_path("../../image/qr-code-scan.svg").content_fit(iced::ContentFit::ScaleDown);
                 col = col.push(
                     container(
                         row![
                             text!("`{}`", vtable.name.clone()),
                             iced::widget::horizontal_space(),
+                            button("QR Code")
+                                .on_press(VirtualTableManagerMessage::GenerateQRCode(vtable.name.clone()).into())
+                                .style(virtual_table_button_style),
                             button("X")
                                 .on_press(VirtualTableManagerMessage::DeleteVirtualTable(vtable.name.clone()).into())
                                 .style(virtual_table_button_style)
-                        ]
+                        ].spacing(5)
                     )
                     .padding(10)
                     .style(vtable_container_style).width(Length::Fill)
@@ -231,17 +332,18 @@ impl Tab for VirtualTableManager {
             col = col.push(
                 container(
                     row![
-                        iced::widget::text_input("Table name", &self.table_name)
+                        iced::widget::text_input("Table name", &self.table_name_text_input)
                             .on_input(|s| VirtualTableManagerMessage::TextInputed(s).into()),
                         iced::widget::horizontal_space(),
                         button("+")
-                            .on_press(VirtualTableManagerMessage::AddVirtualTable(self.table_name.clone()).into())
+                            .on_press(VirtualTableManagerMessage::AddVirtualTable(self.table_name_text_input.clone()).into())
                             .style(virtual_table_button_style_add)
                     ]
                 )
                 .padding(10)
                 .style(vtable_container_style).width(Length::Fill)
             );
+        // let client = Client::new();
 
             center(scrollable(col).width(Length::Fill)).into()
 

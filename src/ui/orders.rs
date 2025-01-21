@@ -1,26 +1,31 @@
 
+use std::{collections::{HashMap, HashSet}, thread::current};
+
 use iced::{
     alignment::Horizontal, border::Radius, widget::{
         button, center, column, container, horizontal_rule, horizontal_space, row, scrollable, text, Column
     }, Border, Length, Task, Theme
 };
-use crate::{database_types::VirtualTableID, Message};
-use crate::database_types;
+
+use crate::{shared::req_resp, Message};
+use crate::shared::dbt;
 use super::Tab;
 
-use crate::server_old as server;
 
 const TITLE: &str = "Orders"; 
 const ICON:  char = '\u{e9ba}';
 
 #[derive(Debug, Clone)]
 pub enum OrderListMessage {
-    FetchedVirtualTablesAndItems(server::FetchVirtualTablesAndItems),
-    UpdateOrders(Result<VirtualTableID, String>),
-    TablePressed(database_types::VirtualTableID),
-    FetchedOrders(Result<server::FetchVirtualTableNewOrders, String>),
-    FinishOrder(database_types::OrderID),
-    PollOrders
+    FetchedVirtualTablesAndItems(Result<serde_json::Value, String>),
+    UpdateOrders(Result<serde_json::Value, String>),
+    TablePressed(dbt::VirtualTableID),
+    FetchedOrders(Result<serde_json::Value, String>),
+    FinishOrder(dbt::OrderID),
+    PollOrders,
+    FetchedOrderAndUnfinished(Result<serde_json::Value, String>),
+    PollFetchedTablesWithUnfinishedOrders,
+    PollFetchedTablesWithUnfinishedOrdersPost(Result<serde_json::Value, String>),
 }
 
 
@@ -42,10 +47,11 @@ impl Into<crate::Message> for OrderListMessage {
 #[derive(Debug)]
 pub struct OrderList {
 
-    pub fetch_vtables: Result<server::FetchVirtualTables, String>,
-    pub current_vtable: Option<database_types::VirtualTableID>,
-    pub fetch_orders: Result<server::FetchVirtualTableNewOrders, String>,
-    pub fetch_items: Result<server::FetchItems, String>
+    pub fetch_vtables: Result<Vec<dbt::VirtualTable>, String>,
+    pub current_vtable: Option<dbt::VirtualTableID>,
+    pub fetch_orders: Result<Vec<dbt::Order>, String>,
+    pub fetch_items: Result<Vec<dbt::Offer>, String>,
+    pub unfinished_tables: Result<Vec<dbt::VirtualTableID>, String>
 
 }
 
@@ -55,7 +61,8 @@ impl Default for OrderList {
             current_vtable: None,
             fetch_vtables:  Err("Fetching data...".to_string()),
             fetch_orders:   Err("Click on a table first :)".to_string()),
-            fetch_items:    Err("Couldn't fetch Item's".to_string()) 
+            fetch_items:    Err("Couldn't fetch Item's".to_string()),
+            unfinished_tables: Err("Couldn't fetch orders.".to_string())
         }
     }
 }
@@ -67,45 +74,145 @@ impl OrderList {
     pub fn update(&mut self, message: OrderListMessage) -> Task<Message> {
 
         match message {
-            OrderListMessage::FetchedVirtualTablesAndItems(fetch) => {
-                self.fetch_vtables = fetch.fetched_vtables;
-                self.fetch_items = fetch.fetched_items;
-                eprintln!("Fetched data: {:#?}", self);
-                return Task::none()
-            },
-            OrderListMessage::TablePressed(vtable) => {
-                self.current_vtable = Some(vtable.clone());
-                return  Task::perform(
-                    async move {server::FetchVirtualTableNewOrders::from_db(vtable)}, 
-                    |value| {
-                        OrderListMessage::FetchedOrders(value).into()
+            OrderListMessage::PollFetchedTablesWithUnfinishedOrders => {
+                let mut request = req_resp::Request {
+                    kind: req_resp::RequestKind::Orders,
+                    payload: Some(serde_json::to_value(req_resp::OrdersRequestData {
+                        new: true,
+                        table: None
+                    }).unwrap())                
+                };
+                return Task::perform(
+                    async move {request.send_request("".to_string()).await}, 
+                    |result| OrderListMessage::PollFetchedTablesWithUnfinishedOrdersPost(result).into(),
+                );
+            }
+            OrderListMessage::PollFetchedTablesWithUnfinishedOrdersPost(fetch) => {
+                let value = match fetch {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.unfinished_tables = Err(err.to_string());
+                        return Task::none();
                     }
-                )
+                };
+                let response = match serde_json::from_value::<req_resp::OrdersResponseData>(value) {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        self.unfinished_tables = Err(err.to_string());
+                        return Task::none()
+                    }
+                };
+                let mut unique = HashSet::new();
+                for order in response.orders {
+                    unique.insert(order.id.table);
+                }
+                self.unfinished_tables = Ok(unique.into_iter().collect::<Vec<String>>());
+                Task::none()
+            }
+            OrderListMessage::FetchedVirtualTablesAndItems(fetch) => {
+                let value = match fetch {
+                    Ok(value) => value,
+                    Err(err) => {
+                        log::error!("err: {}", err);
+                        self.fetch_items = Err("Failed to fetch offers and tables. 1".to_string());
+                        self.fetch_vtables = Err("Failed to fetch offers and tables. 1".to_string());
+                        return Task::none();
+                    }
+                };
+                let response = match serde_json::from_value::<req_resp::OffersTablesResponseData>(value) {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        self.fetch_items = Err("Failed to fetch offers and tables. 2".to_string());
+                        self.fetch_vtables = Err("Failed to fetch offers and tables. 2".to_string());
+                        return Task::none();
+                    }
+                };
+                self.fetch_vtables = Ok(response.tables);
+                self.fetch_items = Ok(response.offers);
+                // eprintln!("Fetched data: {:#?}", self);
+                return Task::perform(
+                    async move {}, 
+                    |result| OrderListMessage::PollFetchedTablesWithUnfinishedOrders.into(),
+                );    
+            },
+            OrderListMessage::TablePressed(table) => {
+                self.current_vtable = Some(table.clone());
+                let mut request = req_resp::Request {
+                    kind: req_resp::RequestKind::Orders,
+                    payload: Some(serde_json::to_value(req_resp::OrdersRequestData {
+                        new: true,
+                        table: Some(table)
+                    }).unwrap())
+                };
+                return Task::perform(
+                    async move {request.send_request("".to_string()).await}, 
+                    |result| OrderListMessage::FetchedOrderAndUnfinished(result).into(),
+                );
             }
             OrderListMessage::PollOrders => {
                 if let Some(current_table) = &self.current_vtable {
                     // Fetch new orders for the currently selected table
                     let table = current_table.clone();
+                    let mut request = req_resp::Request {
+                        kind: req_resp::RequestKind::Orders,
+                        payload: Some(serde_json::to_value(req_resp::OrdersRequestData {
+                            new: true,
+                            table: Some(table)
+                        }).unwrap())
+                    };
                     return Task::perform(
-                        async move { server::FetchVirtualTableNewOrders::from_db(table) },
-                        |result| OrderListMessage::FetchedOrders(result).into(),
+                        async move {request.send_request("".to_string()).await}, 
+                        |result| OrderListMessage::FetchedOrderAndUnfinished(result).into(),
                     );
                 }
                 Task::none() // Do nothing if no table is selected
             }
             OrderListMessage::FetchedOrders(orders) => {
-                self.fetch_orders = orders;
+                let response = match orders {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.fetch_orders = Err(err.to_string());
+                        return Task::none();
+                    }
+                };
+                match serde_json::from_value::<req_resp::OrdersResponseData>(response) {
+                    Ok(payload) => self.fetch_orders = Ok(payload.orders),
+                    Err(err) => self.fetch_orders = Err(err.to_string())
+                }
                 eprintln!("Fetched orders: {:?}", self.fetch_orders);
                 return Task::none()
             }
+            OrderListMessage::FetchedOrderAndUnfinished(orders) => {
+                let response = match orders {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.fetch_orders = Err(err.to_string());
+                        return Task::none();
+                    }
+                };
+                match serde_json::from_value::<req_resp::OrdersResponseData>(response) {
+                    Ok(payload) => self.fetch_orders = Ok(payload.orders),
+                    Err(err) => self.fetch_orders = Err(err.to_string())
+                }
+                eprintln!("Fetched orders: {:?}", self.fetch_orders);
+                return Task::perform(
+                    async move {}, 
+                    |result| OrderListMessage::PollFetchedTablesWithUnfinishedOrders.into(),
+                );            
+            }
             OrderListMessage::FinishOrder(order_id) => {
-                let table = order_id.table.clone();
-                let request = server::RequestFinishOrder {
-                    order_id: order_id
+                let mut request = req_resp::Request {
+                    kind: req_resp::RequestKind::OrdersFinish,
+                    payload: Some(serde_json::to_value(req_resp::OrdersFinishRequestData {
+                        order: dbt::Order {
+                            id: order_id.clone(),
+                            ..Default::default()
+                        } 
+                    }).unwrap())
                 };
                 self.fetch_orders = Err("Refetching orders...".to_string());
                 return Task::perform(
-                    async move {server::RequestFinishOrder::send_request(request)}, 
+                    async move {request.send_request("".to_string()).await}, 
                     move |value| {
                         OrderListMessage::UpdateOrders(value).into()
                     }
@@ -113,19 +220,33 @@ impl OrderList {
             }
             OrderListMessage::UpdateOrders(result) => {
                 match result {
-                    Ok(table) => {
+                    Ok(value) => {
+                        let response = match serde_json::from_value::<req_resp::OrdersFinishResponseData>(value) {
+                            Ok(payload) => payload,
+                            Err(err) => {
+                                self.fetch_orders = Err(format!("Something went wrong when deleting: {}", err));
+                                return Task::none();
+                            }
+                        };
+
                         let current_table = if self.current_vtable.is_some() {
                             self.current_vtable.clone().unwrap()
                         } else {
-                            self.current_vtable = Some(table.clone());
-                            table
+                            self.current_vtable = Some(response.table.clone());
+                            response.table
+                        };
+
+                        let mut request = req_resp::Request {
+                            kind: req_resp::RequestKind::Orders,
+                            payload: Some(serde_json::to_value(req_resp::OrdersRequestData {
+                                new: true,
+                                table: Some(current_table)
+                            }).unwrap())
                         };
                         return Task::perform(
-                            async move {server::FetchVirtualTableNewOrders::from_db(current_table)}, 
-                            |value| {
-                                OrderListMessage::FetchedOrders(value).into()
-                            }
-                        )
+                            async move {request.send_request("".to_string()).await}, 
+                            |result| OrderListMessage::FetchedOrderAndUnfinished(result).into(),
+                        );
                     },
                     Err(err) => {
                         self.fetch_orders = Err(format!("Something went wrong when deleting: {}", err));
@@ -139,7 +260,7 @@ impl OrderList {
 
 }
 
-fn virtual_table_button_style(theme: &Theme, status: iced::widget::button::Status) -> button::Style {
+fn virtual_table_button_style_new_order(theme: &Theme, status: iced::widget::button::Status) -> button::Style {
 
     let mut table_button_style = button::Style { 
         text_color: theme.extended_palette().primary.weak.text, 
@@ -149,11 +270,12 @@ fn virtual_table_button_style(theme: &Theme, status: iced::widget::button::Statu
             width: 0.0, 
             radius: Radius::new(7)
         }, 
-        shadow: iced::Shadow { 
-            color: theme.extended_palette().secondary.weak.color,
-            offset: iced::Vector::new(0.0, 0.0), 
-            blur_radius: 0.0
-        }
+        ..Default::default()
+        // shadow: iced::Shadow { 
+        //     color: theme.extended_palette().secondary.weak.color,
+        //     offset: iced::Vector::new(0.0, 0.0), 
+        //     blur_radius: 0.0
+        // }
     };
 
     match status {
@@ -168,6 +290,46 @@ fn virtual_table_button_style(theme: &Theme, status: iced::widget::button::Statu
         button::Status::Hovered => {
             table_button_style.text_color = theme.extended_palette().primary.strong.text; 
             table_button_style.background = Some(iced::Background::Color(theme.extended_palette().primary.strong.color));
+        },
+        _ => {}
+    }
+
+
+    table_button_style
+
+
+}
+
+fn virtual_table_button_style(theme: &Theme, status: iced::widget::button::Status) -> button::Style {
+
+    let mut table_button_style = button::Style { 
+        text_color: theme.extended_palette().secondary.weak.text, 
+        background: Some(iced::Background::Color(theme.extended_palette().secondary.weak.color)), 
+        border: Border { 
+            color: theme.extended_palette().secondary.base.color, 
+            width: 0.0, 
+            radius: Radius::new(7)
+        }, 
+        ..Default::default()
+        // shadow: iced::Shadow { 
+        //     color: theme.extended_palette().primary.strong.color,
+        //     offset: iced::Vector::new(0.0, 0.0), 
+        //     blur_radius: 0.0
+        // }
+    };
+
+    match status {
+        button::Status::Active => {
+            table_button_style.text_color = theme.extended_palette().secondary.base.text; 
+            table_button_style.background = Some(iced::Background::Color(theme.extended_palette().secondary.base.color));
+        },
+        button::Status::Pressed =>{
+            table_button_style.text_color = theme.extended_palette().secondary.strong.text.inverse(); 
+            table_button_style.background = Some(iced::Background::Color(theme.extended_palette().secondary.strong.color.inverse()));
+        },
+        button::Status::Hovered => {
+            table_button_style.text_color = theme.extended_palette().secondary.strong.text; 
+            table_button_style.background = Some(iced::Background::Color(theme.extended_palette().secondary.strong.color));
         },
         _ => {}
     }
@@ -241,7 +403,7 @@ impl Tab for OrderList {
             .spacing(10)
             .padding(20);
 
-        let vtables = self.fetch_vtables.clone().unwrap().vtables;
+        let vtables = self.fetch_vtables.clone().unwrap();
 
         for vtable in vtables {
 
@@ -259,7 +421,13 @@ impl Tab for OrderList {
                         }),
                     ]
                 )
-                .style(virtual_table_button_style)
+                .style(
+                    if self.unfinished_tables.clone().is_ok_and(|x| x.contains(&vtable.name.clone())) {
+                        virtual_table_button_style_new_order
+                    } else {
+                        virtual_table_button_style
+                    }
+                )
                 .on_press(OrderListMessage::TablePressed(vtable.name).into())
                 .width(Length::Fill)
             )
@@ -275,13 +443,16 @@ impl Tab for OrderList {
             order_pane = center(text!("fetch_items: {}", self.fetch_items.clone().unwrap_err())).into();
         } else {
 
-            let fetched = self.fetch_orders.clone().unwrap();
-            if fetched.orders.is_empty() {
+            let fetched_orders = self.fetch_orders.clone().unwrap();
+            if fetched_orders.is_empty() {
                 order_pane = center(text!("No active orders for this table :(")).into()
             } else {
-                let item_map = self.fetch_items.clone().unwrap().items;
+                let mut item_map: HashMap<String, dbt::Offer> = HashMap::new();
+                for offer in self.fetch_items.clone().unwrap() {
+                    item_map.insert(offer.clone().name, offer);
+                }
                 let mut order_list: Column<'_, Message> = Column::new();
-                for order in fetched.orders {
+                for order in fetched_orders {
                     let mut total: (u32, u32) = (0,0); 
 
                     let mut item_list: Column<'_, Message> = Column::new()
