@@ -88,8 +88,8 @@ impl OfferManager {
             },
             OfferManagerMessage::AddOffers => {
                 if self.offer_name_text_input.is_empty()
-                |  self.offer_price_text_input.is_empty()
-                |  self.offer_description_text_input.is_empty() {
+                ||  self.offer_price_text_input.is_empty()
+                ||  self.offer_description_text_input.is_empty() {
                     return Task::none()
                 }
 
@@ -104,9 +104,12 @@ impl OfferManager {
                         return Task::none()
                     };
                     let Ok(fraction) = right.parse::<u32>() else {
-                        log::error!("Invalid integer!");
+                        log::error!("Invalid fraction!");
                         return Task::none()
                     };
+                    if fraction >= 100 {
+                        log::error!("Invalid fraction!");
+                    }
                     (integer, fraction)
                 };
 
