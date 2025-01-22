@@ -1,65 +1,69 @@
 use clap::builder::Str;
-use iced::{advanced::widget::operation::text_input, border::Radius, widget::{button, center, container, row, scrollable, text, Column}, Border, Length, Task, Theme};
+use iced::{advanced::widget::operation::text_input, border::Radius, widget::{button, center, container, row, column, scrollable, text, Column}, Border, Length, Task, Theme};
 use serde_json::json;
 
 
-use crate::shared::{dbt as dbt, req_resp};
+use crate::shared::{dbt::{self as dbt, Offer}, req_resp};
 use super::Tab;
 
-const TITLE: &str = "Virtual Tables"; 
+const TITLE: &str = "Offers"; 
 const ICON:  char = '\u{e9ba}';
 
 #[derive(Debug, Clone)]
-pub enum VirtualTableManagerMessage {
+pub enum OfferManagerMessage {
     FetchedOffers(Result<serde_json::Value, String>),
     DeleteOffers(dbt::VirtualTableID),
     DeleteOffersPost(Result<serde_json::Value, String>),
-    AddOffers(dbt::VirtualTableID),
+    AddOffers,
     AddOffersPost(Result<serde_json::Value, String>),
     TextInputedName(String),
     TextInputedDescription(String),
     TextInputedPrice(String),
 }
 
-impl Into<crate::Message> for VirtualTableManagerMessage {
+impl Into<crate::Message> for OfferManagerMessage {
     fn into(self) -> crate::Message {
-        crate::Message::UI(super::UIMessage::VirtualTableManager(self))
+        crate::Message::UI(super::UIMessage::OfferManager(self))
     }
 }
 
 
-pub struct VirtualTableManager {
-    pub fetch_vtables: Result<Vec<dbt::VirtualTable>, String>,
-    pub table_name_text_input: String
+pub struct OfferManager {
+    pub fetch_offers: Result<Vec<dbt::Offer>, String>,
+    pub offer_name_text_input: String,
+    pub offer_description_text_input: String,
+    pub offer_price_text_input: String,
 }
 
-impl Default for VirtualTableManager {
+impl Default for OfferManager {
     fn default() -> Self {
         Self { 
-            fetch_vtables: Err("Fetching data...".to_string()),
-            table_name_text_input: String::new()
+            fetch_offers: Err("Fetching data...".to_string()),
+            offer_name_text_input: String::new(),
+            offer_description_text_input: String::new(),
+            offer_price_text_input: String::new(),
         }
     }
 }
 
 
 
-impl VirtualTableManager {
+impl OfferManager {
 
-    pub fn update(&mut self, message: VirtualTableManagerMessage) -> Task<crate::Message> {
+    pub fn update(&mut self, message: OfferManagerMessage) -> Task<crate::Message> {
 
         match message {
-            VirtualTableManagerMessage::FetchedVirtualTables(response) => {
+            OfferManagerMessage::FetchedOffers(response) => {
                 if response.is_ok() {
-                    match serde_json::from_value::<req_resp::TablesResponseData>(response.unwrap()) {
-                        Ok(payload) => self.fetch_vtables = Ok(payload.tables),
-                        Err(err) => self.fetch_vtables = Err(err.to_string())
+                    match serde_json::from_value::<req_resp::OffersResponseData>(response.unwrap()) {
+                        Ok(payload) => self.fetch_offers = Ok(payload.offers),
+                        Err(err) => self.fetch_offers = Err(err.to_string())
                     }
                 } else {
-                    self.fetch_vtables = Err(response.unwrap_err().to_string())
+                    self.fetch_offers = Err(response.unwrap_err().to_string())
                 }
             },
-            VirtualTableManagerMessage::DeleteVirtualTable(table) => {
+            OfferManagerMessage::DeleteOffers(table) => {
                 let mut request = req_resp::Request {
                     kind: req_resp::RequestKind::TablesDelete,
                     payload: None
@@ -67,52 +71,81 @@ impl VirtualTableManager {
                 return Task::perform(
                     async move {request.send_request(table).await}, 
                     |value| {
-                        VirtualTableManagerMessage::DeleteVirtualTablePost(value).into()}
+                        OfferManagerMessage::DeleteOffersPost(value).into()}
                 )
             },
-            VirtualTableManagerMessage::DeleteVirtualTablePost(result) => {
+            OfferManagerMessage::DeleteOffersPost(result) => {
                 if result.is_ok() {
                     let mut request = req_resp::Request {
-                        kind: req_resp::RequestKind::Tables,
+                        kind: req_resp::RequestKind::Offers,
                         payload: None
                     };
                     return Task::perform(
                         async move {request.send_request("".to_string()).await}, 
-                        |value| {VirtualTableManagerMessage::FetchedVirtualTables(value).into()}
+                        |value| {OfferManagerMessage::FetchedOffers(value).into()}
                     )
                 }
             },
-            VirtualTableManagerMessage::AddVirtualTable(name) => {
-                if name.is_empty() {
+            OfferManagerMessage::AddOffers => {
+                if self.offer_name_text_input.is_empty()
+                |  self.offer_price_text_input.is_empty()
+                |  self.offer_description_text_input.is_empty() {
                     return Task::none()
                 }
+
+                let (integer, fraction) = {
+                    let price = self.offer_price_text_input.clone();
+                    let Some((left, right)) = price.split_once(",") else {
+                        log::error!("Invalid price!");
+                        return Task::none()
+                    };
+                    let Ok(integer) = left.parse::<u32>() else {
+                        log::error!("Invalid integer!");
+                        return Task::none()
+                    };
+                    let Ok(fraction) = right.parse::<u32>() else {
+                        log::error!("Invalid integer!");
+                        return Task::none()
+                    };
+                    (integer, fraction)
+                };
+
                 let mut request = req_resp::Request {
-                    kind: req_resp::RequestKind::TablesInsert,
-                    payload: Some(serde_json::to_value(req_resp::TablesInsertRequestData {
-                        table: dbt::VirtualTable { name, order_count: 0 }
+                    kind: req_resp::RequestKind::OffersInsert,
+                    payload: Some(serde_json::to_value(req_resp::OffersInsertRequestData {
+                        offer: dbt::Offer {
+                            name: self.offer_description_text_input.clone(),
+                            description: self.offer_description_text_input.clone(), 
+                            price_integer: integer,
+                            price_fraction: fraction
+                        }
                     }).unwrap())
                 };
                 return Task::perform(
                     async move {request.send_request("".to_string()).await}, 
-                    |value| {VirtualTableManagerMessage::AddVirtualTablePost(value).into()}
+                    |value| {OfferManagerMessage::AddOffersPost(value).into()}
                 )
             },
-            VirtualTableManagerMessage::AddVirtualTablePost(result) => {
+            OfferManagerMessage::AddOffersPost(result) => {
                 if result.is_ok() {
-                    self.table_name_text_input = String::new();
+                    self.offer_name_text_input = String::new();
+                    self.offer_description_text_input = String::new();
+                    self.offer_price_text_input = String::new();
                     let mut request = req_resp::Request {
-                        kind: req_resp::RequestKind::Tables,
+                        kind: req_resp::RequestKind::Offers,
                         payload: None
                     };
                     return Task::perform(
                         async move {request.send_request("".to_string()).await}, 
                         |value| {
-                            VirtualTableManagerMessage::FetchedVirtualTables(value).into()
+                            OfferManagerMessage::FetchedOffers(value).into()
                         }
                     )
                 }
             }
-            VirtualTableManagerMessage::TextInputed(text) => {self.table_name_text_input = text}
+            OfferManagerMessage::TextInputedName(text) => {self.offer_name_text_input = text}
+            OfferManagerMessage::TextInputedDescription(text) => {self.offer_description_text_input = text}
+            OfferManagerMessage::TextInputedPrice(text) => {self.offer_price_text_input = text}
         }
         Task::none()
 
@@ -214,7 +247,7 @@ fn vtable_container_style(theme: &Theme) -> iced::widget::container::Style {
 }
 
 
-impl Tab for VirtualTableManager {
+impl Tab for OfferManager {
 
     type Message = crate::Message;
 
@@ -232,21 +265,25 @@ impl Tab for VirtualTableManager {
 
     fn content(&self) -> iced::Element<'_, Self::Message> {
         
-        if self.fetch_vtables.is_err() {
-            text!("{}", self.fetch_vtables.clone().expect_err("").to_string()).into()
+        if self.fetch_offers.is_err() {
+            text!("{}", self.fetch_offers.clone().expect_err("").to_string()).into()
         } else {
 
             let mut col: Column<'_, crate::Message> = Column::new().spacing(20).padding(30);
 
-            let vtables = self.fetch_vtables.clone().unwrap();
-            for vtable in vtables.iter() {
+            let offers = self.fetch_offers.clone().unwrap();
+            for offer in offers.iter() {
                 col = col.push(
                     container(
                         row![
-                            text!("`{}`", vtable.name.clone()),
+                            column![
+                                text!("`{}`", offer.name.clone()),
+                                text!("{}", offer.description.clone()),
+                                text!("Price: {},{}", offer.price_integer, offer.price_fraction)
+                            ],
                             iced::widget::horizontal_space(),
                             button("X")
-                                .on_press(VirtualTableManagerMessage::DeleteVirtualTable(vtable.name.clone()).into())
+                                .on_press(OfferManagerMessage::DeleteOffers(offer.name.clone()).into())
                                 .style(virtual_table_button_style)
                         ]
                     )
@@ -257,11 +294,19 @@ impl Tab for VirtualTableManager {
             col = col.push(
                 container(
                     row![
-                        iced::widget::text_input("Table name", &self.table_name_text_input)
-                            .on_input(|s| VirtualTableManagerMessage::TextInputed(s).into()),
+                        column![
+                            
+                            iced::widget::text_input("Name", &self.offer_name_text_input)
+                                .on_input(|s| OfferManagerMessage::TextInputedName(s).into()),
+                            iced::widget::text_input("Description", &self.offer_description_text_input)
+                                .on_input(|s| OfferManagerMessage::TextInputedDescription(s).into()),
+                            iced::widget::text_input("Price", &self.offer_price_text_input)
+                                .on_input(|s| OfferManagerMessage::TextInputedPrice(s).into()),
+                            
+                        ],
                         iced::widget::horizontal_space(),
                         button("+")
-                            .on_press(VirtualTableManagerMessage::AddVirtualTable(self.table_name_text_input.clone()).into())
+                            .on_press(OfferManagerMessage::AddOffers.into())
                             .style(virtual_table_button_style_add)
                     ]
                 )

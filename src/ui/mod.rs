@@ -9,9 +9,11 @@ use iced_aw::{direction::{Horizontal, Vertical}, style::tab_bar::dark, tab_bar::
 
 pub mod settings;
 pub mod orders;
+pub mod offers;
 pub mod vtable;
 // pub mod items;
 
+use offers::{OfferManager, OfferManagerMessage};
 use settings::{
     Settings,
     SettingsMessage
@@ -46,7 +48,8 @@ pub enum UITabID {
     #[default]  
     Settings,
     Orders,
-    VirtualTableManager
+    VirtualTableManager,
+    OfferManager
 }
 
 #[derive(Debug, Clone)]
@@ -54,7 +57,8 @@ pub enum UIMessage {
     TabSelected(UITabID),
     Settings(SettingsMessage),
     Orders(OrderListMessage),
-    VirtualTableManager(VirtualTableManagerMessage)
+    VirtualTableManager(VirtualTableManagerMessage),
+    OfferManager(OfferManagerMessage)
 }
 
 impl Into<crate::Message> for UIMessage {
@@ -68,6 +72,7 @@ pub struct UI {
     pub tables: Vec<VirtualTable>,
     pub active_tab: UITabID,
     pub vtable: VirtualTableManager,
+    pub offers: OfferManager,
     pub settings: Settings,
     pub orders: OrderList
 }
@@ -136,6 +141,16 @@ impl UI {
                             |value| {VirtualTableManagerMessage::FetchedVirtualTables(value).into()}
                         )
                     },
+                    UITabID::OfferManager => {
+                        let mut request = req_resp::Request {
+                            kind: req_resp::RequestKind::Offers,
+                            payload: None
+                        };
+                        return Task::perform(
+                            async move {request.send_request("".to_string()).await}, 
+                            |value| {OfferManagerMessage::FetchedOffers(value).into()}
+                        )
+                    }
                     _ => {}
                 }
             }
@@ -156,7 +171,11 @@ impl UI {
             UIMessage::VirtualTableManager(message) => {
                 let task = VirtualTableManager::update(&mut self.vtable, message);
                 return task;
-            }
+            },
+            UIMessage::OfferManager(message) => {
+                let task = OfferManager::update(&mut self.offers, message);
+                return task;
+            },
         }
 
         return Task::none()
@@ -180,6 +199,11 @@ impl UI {
                 UITabID::VirtualTableManager,
                 self.vtable.tab_label(),
                 self.vtable.view(),
+            )
+            .push(
+                UITabID::OfferManager,
+                self.offers.tab_label(),
+                self.offers.view(),
             )
             .set_active_tab(&self.active_tab)
             .icon_font(ICON)
